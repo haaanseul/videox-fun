@@ -57,6 +57,7 @@ from transformers import AutoTokenizer
 from transformers.utils import ContextManagers
 
 import datasets
+from face_utils import prepare_face_models, process_face_embeddings_infer
 
 current_file_path = os.path.abspath(__file__)
 project_roots = [os.path.dirname(current_file_path), os.path.dirname(os.path.dirname(current_file_path)), os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))]
@@ -714,6 +715,17 @@ def parse_args():
         default=1.29,
         help="Scale of mode weighting scheme. Only effective when using the `'mode'` as the `weighting_scheme`.",
     )
+    # custom args
+    parser.add_argument(
+        "--use_arcface",
+        action="store_true",
+        help="Use ArcFace embeddings as additional cross-attention context.",
+    )
+    parser.add_argument(
+        "--use_sam",
+        action="store_true",
+        help="Use SAM embeddings as additional cross-attention context.",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -865,8 +877,14 @@ def main():
         )
         clip_image_encoder = clip_image_encoder.eval()
 
+    if args.use_arcface:
+        # Load ArcFace-related models (face embedding only)
+        face_helper_1, face_helper_2, face_main_model = prepare_face_models(
+            model_path=args.model_path,
+            device=accelerator.device,
+            dtype=weight_dtype,
+        )
     
-
     # Freeze vae and text_encoder and set transformer3d to trainable
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
@@ -1083,6 +1101,7 @@ def main():
         video_repeat=args.video_repeat, 
         image_sample_size=args.image_sample_size,
         enable_bucket=args.enable_bucket, enable_inpaint=True if args.train_mode != "normal" else False,
+        use_face_image=args.use_arcface # use face image
     )
     
     if args.enable_bucket:
@@ -1124,6 +1143,11 @@ def main():
                 new_examples["mask_pixel_values"] = []
                 new_examples["mask"] = []
                 new_examples["clip_pixel_values"] = []
+
+            if args.use_arcface:
+                new_examples["arcface_embedding"] = []
+                fallback_arcface = torch.zeros(1, 512, dtype=weight_dtype).to(accelerator.device)
+
 
             # Get downsample ratio in image and videos
             pixel_value     = examples[0]["pixel_values"]
@@ -1235,12 +1259,29 @@ def main():
                     clip_pixel_values = (clip_pixel_values * 0.5 + 0.5) * 255
                     new_examples["clip_pixel_values"].append(clip_pixel_values)
 
+                if args.use_arcface:
+                    face_img_path = example.get("face_image_path", None)
+                    if face_img_path is None:
+                        print("No face_image_path; fallback to zeros.")
+                        arcface_embedding = fallback_arcface
+                    else:
+                        arcface_embedding, _ = process_face_embeddings_infer(
+                            face_helper_1, face_helper_2, face_main_model,
+                            device=accelerator.device,
+                            weight_dtype=weight_dtype,
+                            img_file_path=face_img_path,
+                            is_align_face=True,
+                        )
+                    new_examples["arcface_embedding"].append(arcface_embedding)
+
             # Limit the number of frames to the same
             new_examples["pixel_values"] = torch.stack([example[:batch_video_length] for example in new_examples["pixel_values"]])
             if args.train_mode != "normal":
                 new_examples["mask_pixel_values"] = torch.stack([example[:batch_video_length] for example in new_examples["mask_pixel_values"]])
                 new_examples["mask"] = torch.stack([example[:batch_video_length] for example in new_examples["mask"]])
                 new_examples["clip_pixel_values"] = torch.stack([example for example in new_examples["clip_pixel_values"]])
+            if args.use_arcface:
+                new_examples["arcface_embedding"] = torch.cat(new_examples["arcface_embedding"], dim=0) 
 
             # Encode prompts when enable_text_encoder_in_dataloader=True
             if args.enable_text_encoder_in_dataloader:

@@ -413,6 +413,7 @@ class WanI2VCrossAttention(WanSelfAttention):
 WAN_CROSSATTENTION_CLASSES = {
     't2v_cross_attn': WanT2VCrossAttention,
     'i2v_cross_attn': WanI2VCrossAttention,
+    'custom_cross_attn': WanI2VCrossAttention,  # Custom cross-attention for custom model
 }
 
 
@@ -612,7 +613,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         super().__init__()
 
-        assert model_type in ['t2v', 'i2v']
+        assert model_type in ['t2v', 'i2v', 'custom']
         self.model_type = model_type
 
         self.patch_size = patch_size
@@ -643,7 +644,12 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
 
         # blocks
-        cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
+        if model_type == 't2v':
+            cross_attn_type = 't2v_cross_attn'  
+        if model_type == 'custom':
+            cross_attn_type = 'custom_cross_attn'
+        else: cross_attn_type='i2v_cross_attn'
+
         self.blocks = nn.ModuleList([
             WanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
                               window_size, qk_norm, cross_attn_norm, eps)
@@ -665,7 +671,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             dim=1
         )
 
-        if model_type == 'i2v':
+        if model_type == 'i2v' and model_type == 'custom':
             self.img_emb = MLPProj(1280, dim)
 
         self.teacache = None
@@ -702,6 +708,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         context,
         seq_len,
         clip_fea=None,
+        arc_fea=None,
         y=None,
         cond_flag=True,
     ):
@@ -729,7 +736,11 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
         if self.model_type == 'i2v':
-            assert clip_fea is not None and y is not None
+            assert clip_fea is not None and y is not None\
+            
+        if self.model_type == 'custom':
+            assert arc_fea is not None and y is not None
+
         # params
         device = self.patch_embedding.weight.device
         dtype = x.dtype
@@ -773,7 +784,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 for u in context
             ]))
 
-        if clip_fea is not None:
+        if clip_fea is not None or arc_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
             context = torch.concat([context_clip, context], dim=1)
 
