@@ -408,12 +408,56 @@ class WanI2VCrossAttention(WanSelfAttention):
         x = x + img_x
         x = self.o(x)
         return x
+    
+
+class WanCustomCrossAttention(WanSelfAttention):
+
+    def __init__(self,
+                 dim,
+                 num_heads,
+                 window_size=(-1, -1),
+                 qk_norm=True,
+                 eps=1e-6):
+        super().__init__(dim, num_heads, window_size, qk_norm, eps)
+
+        self.k_img = nn.Linear(dim, dim)
+        self.v_img = nn.Linear(dim, dim)
+        # self.alpha = nn.Parameter(torch.zeros((1, )))
+        self.norm_k_img = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
+    def forward(self, x, context, context_lens):
+        r"""
+        Args:
+            x(Tensor): Shape [B, L1, C]
+            context(Tensor): Shape [B, L2, C]
+            context_lens(Tensor): Shape [B]
+        """
+        context_img = context[:, :0]
+        context = context[:, 0:]
+        b, n, d = x.size(0), self.num_heads, self.head_dim
+
+        # compute query, key, value
+        q = self.norm_q(self.q(x)).view(b, -1, n, d)
+        k = self.norm_k(self.k(context)).view(b, -1, n, d)
+        v = self.v(context).view(b, -1, n, d)
+        k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
+        v_img = self.v_img(context_img).view(b, -1, n, d)
+        img_x = attention(q, k_img, v_img, k_lens=None)
+        # compute attention
+        x = attention(q, k, v, k_lens=context_lens)
+
+        # output
+        x = x.flatten(2)
+        img_x = img_x.flatten(2)
+        x = x + img_x
+        x = self.o(x)
+        return x
 
 
 WAN_CROSSATTENTION_CLASSES = {
     't2v_cross_attn': WanT2VCrossAttention,
     'i2v_cross_attn': WanI2VCrossAttention,
-    'custom_cross_attn': WanI2VCrossAttention,  # Custom cross-attention for custom model
+    'custom_cross_attn': WanCustomCrossAttention,  # Custom cross-attention for custom model
 }
 
 
@@ -646,9 +690,10 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         # blocks
         if model_type == 't2v':
             cross_attn_type = 't2v_cross_attn'  
+        if model_type == 'i2v':
+            cross_attn_type='i2v_cross_attn'
         if model_type == 'custom':
             cross_attn_type = 'custom_cross_attn'
-        else: cross_attn_type='i2v_cross_attn'
 
         self.blocks = nn.ModuleList([
             WanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
@@ -671,8 +716,10 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             dim=1
         )
 
-        if model_type == 'i2v' and model_type == 'custom':
+        if model_type == 'i2v':
             self.img_emb = MLPProj(1280, dim)
+        if model_type == 'custom':
+            self.arc_emb = MLPProj(512, dim) # 512 -> dim으로
 
         self.teacache = None
         self.gradient_checkpointing = False
@@ -736,11 +783,10 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
         if self.model_type == 'i2v':
-            assert clip_fea is not None and y is not None\
-            
+            assert clip_fea is not None and y is not None
         if self.model_type == 'custom':
-            assert arc_fea is not None and y is not None
-
+            assert arc_fea is not None
+            
         # params
         device = self.patch_embedding.weight.device
         dtype = x.dtype

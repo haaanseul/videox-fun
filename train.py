@@ -57,7 +57,7 @@ from transformers import AutoTokenizer
 from transformers.utils import ContextManagers
 
 import datasets
-from face_utils import prepare_face_models, process_face_embeddings_infer
+from face_utils import prepare_face_models, process_face_embeddings
 
 current_file_path = os.path.abspath(__file__)
 project_roots = [os.path.dirname(current_file_path), os.path.dirname(os.path.dirname(current_file_path)), os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))]
@@ -175,7 +175,7 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
             **filter_kwargs(FlowMatchEulerDiscreteScheduler, OmegaConf.to_container(config['scheduler_kwargs']))
         )
 
-        if args.train_mode != "normal":
+        if args.train_mode == "i2v":
             pipeline = WanI2VPipeline(
                 vae=accelerator.unwrap_model(vae).to(weight_dtype), 
                 text_encoder=accelerator.unwrap_model(text_encoder),
@@ -202,7 +202,7 @@ def log_validation(vae, text_encoder, tokenizer, clip_image_encoder, transformer
         images = []
         for i in range(len(args.validation_prompts)):
             with torch.no_grad():
-                if args.train_mode != "normal":
+                if args.train_mode == "i2v":
                     with torch.autocast("cuda", dtype=weight_dtype):
                         video_length = int((args.video_sample_n_frames - 1) // vae.config.temporal_compression_ratio * vae.config.temporal_compression_ratio) + 1 if args.video_sample_n_frames != 1 else 1
                         input_video, input_video_mask, _ = get_image_to_video_latent(None, None, video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size])
@@ -864,13 +864,21 @@ def main():
             additional_kwargs=OmegaConf.to_container(config['vae_kwargs']),
         )
             
-    # Get Transformer
+    # model_type 설정
+    # config 불러와서 model_type 설정
+    transformer_kwargs = OmegaConf.to_container(config['transformer_additional_kwargs'])
+    if args.use_arcface:
+        transformer_kwargs['model_type'] = 'custom'
+
     transformer3d = WanTransformer3DModel.from_pretrained(
-        os.path.join(args.pretrained_model_name_or_path, config['transformer_additional_kwargs'].get('transformer_subpath', 'transformer')),
-        transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs']),
+        os.path.join(
+            args.pretrained_model_name_or_path,
+            config['transformer_additional_kwargs'].get('transformer_subpath', 'transformer')
+        ),
+        transformer_additional_kwargs=transformer_kwargs,
     ).to(weight_dtype)
 
-    if args.train_mode != "normal":
+    if args.train_mode == "i2v":
         # Get Clip Image Encoder
         clip_image_encoder = CLIPModel.from_pretrained(
             os.path.join(args.pretrained_model_name_or_path, config['image_encoder_kwargs'].get('image_encoder_subpath', 'image_encoder')),
@@ -878,7 +886,7 @@ def main():
         clip_image_encoder = clip_image_encoder.eval()
 
     if args.use_arcface:
-        # Load ArcFace-related models (face embedding only)
+        # Load ArcFace-related models
         face_helper_1, face_helper_2, face_main_model = prepare_face_models(
             model_path=args.model_path,
             device=accelerator.device,
@@ -889,7 +897,7 @@ def main():
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     transformer3d.requires_grad_(False)
-    if args.train_mode != "normal":
+    if args.train_mode == "i2v":
         clip_image_encoder.requires_grad_(False)
 
     if args.transformer_path is not None:
@@ -1139,14 +1147,13 @@ def main():
             new_examples["pixel_values"] = []
             new_examples["text"]         = []
             # Used in Inpaint mode 
-            if args.train_mode != "normal":
+            if args.train_mode == "i2v":
                 new_examples["mask_pixel_values"] = []
                 new_examples["mask"] = []
                 new_examples["clip_pixel_values"] = []
 
             if args.use_arcface:
-                new_examples["arcface_embedding"] = []
-                fallback_arcface = torch.zeros(1, 512, dtype=weight_dtype).to(accelerator.device)
+                new_examples["face_image_values"] = []
 
 
             # Get downsample ratio in image and videos
@@ -1247,7 +1254,7 @@ def main():
                 if batch_video_length <= 0:
                     batch_video_length = 1
 
-                if args.train_mode != "normal":
+                if args.train_mode == "i2v":
                     mask = get_random_mask(new_examples["pixel_values"][-1].size(), image_start_only=True)
                     mask_pixel_values = new_examples["pixel_values"][-1] * (1 - mask) 
                     # Wan 2.1 use 0 for masked pixels
@@ -1260,29 +1267,19 @@ def main():
                     new_examples["clip_pixel_values"].append(clip_pixel_values)
 
                 if args.use_arcface:
-                    face_img_path = example.get("face_image_path", None)
-                    if face_img_path is None:
-                        print("No face_image_path; fallback to zeros.")
-                        arcface_embedding = fallback_arcface
-                    else:
-                        arcface_embedding, _ = process_face_embeddings_infer(
-                            face_helper_1, face_helper_2, face_main_model,
-                            device=accelerator.device,
-                            weight_dtype=weight_dtype,
-                            img_file_path=face_img_path,
-                            is_align_face=True,
-                        )
-                    new_examples["arcface_embedding"].append(arcface_embedding)
+                    face_image = example["face_image_values"]
+                    face_tensor = torch.from_numpy(face_image).permute(2, 0, 1).float()
+                    new_examples["face_image_values"].append(face_tensor)
 
             # Limit the number of frames to the same
             new_examples["pixel_values"] = torch.stack([example[:batch_video_length] for example in new_examples["pixel_values"]])
-            if args.train_mode != "normal":
+            if args.train_mode == "i2v":
                 new_examples["mask_pixel_values"] = torch.stack([example[:batch_video_length] for example in new_examples["mask_pixel_values"]])
                 new_examples["mask"] = torch.stack([example[:batch_video_length] for example in new_examples["mask"]])
                 new_examples["clip_pixel_values"] = torch.stack([example for example in new_examples["clip_pixel_values"]])
             if args.use_arcface:
-                new_examples["arcface_embedding"] = torch.cat(new_examples["arcface_embedding"], dim=0) 
-
+                new_examples["face_image_values"] = torch.stack(new_examples["face_image_values"])
+                
             # Encode prompts when enable_text_encoder_in_dataloader=True
             if args.enable_text_encoder_in_dataloader:
                 prompt_ids = tokenizer(
@@ -1346,7 +1343,7 @@ def main():
     vae.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
     if not args.enable_text_encoder_in_dataloader:
         text_encoder.to(accelerator.device if not args.low_vram else "cpu")
-    if args.train_mode != "normal":
+    if args.train_mode == "i2v":
         clip_image_encoder.to(accelerator.device if not args.low_vram else "cpu", dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -1450,14 +1447,23 @@ def main():
                     pixel_value = pixel_value[None, ...]
                     gif_name = '-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_step}-{idx}'
                     save_videos_grid(pixel_value, f"{args.output_dir}/sanity_check/{gif_name[:10]}.gif", rescale=True)
-                if args.train_mode != "normal":
+                if args.train_mode == "i2v":
                     clip_pixel_values, mask_pixel_values, texts = batch['clip_pixel_values'].cpu(), batch['mask_pixel_values'].cpu(), batch['text']
                     mask_pixel_values = rearrange(mask_pixel_values, "b f c h w -> b c f h w")
                     for idx, (clip_pixel_value, pixel_value, text) in enumerate(zip(clip_pixel_values, mask_pixel_values, texts)):
                         pixel_value = pixel_value[None, ...]
                         Image.fromarray(np.uint8(clip_pixel_value)).save(f"{args.output_dir}/sanity_check/clip_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.png")
                         save_videos_grid(pixel_value, f"{args.output_dir}/sanity_check/mask_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.gif", rescale=True)
-
+                if args.use_arcface:
+                    face_pixel_values, texts = batch["face_image_values"].cpu(), batch["text"]
+                    os.makedirs(os.path.join(args.output_dir, "sanity_check"), exist_ok=True)
+                    for idx, (face_pixel_value, text) in enumerate(zip(face_pixel_values, texts)):
+                        face_pixel_value = face_pixel_value.permute(1, 2, 0).numpy().astype(np.uint8)
+                        gif_name = '-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_step}-{idx}'
+                        Image.fromarray(face_pixel_value).save(
+                            f"{args.output_dir}/sanity_check/face_{gif_name[:10]}.png"
+                        )
+                        
             with accelerator.accumulate(transformer3d):
                 # Convert images to latent space
                 pixel_values = batch["pixel_values"].to(weight_dtype)
@@ -1479,7 +1485,7 @@ def main():
                         else:
                             batch['text'] = batch['text'] * 2
                 
-                if args.train_mode != "normal":
+                if args.train_mode == "i2v":
                     clip_pixel_values = batch["clip_pixel_values"].to(weight_dtype)
                     mask_pixel_values = batch["mask_pixel_values"].to(weight_dtype)
                     mask = batch["mask"].to(weight_dtype)
@@ -1493,6 +1499,15 @@ def main():
                             clip_pixel_values = torch.tile(clip_pixel_values, (2, 1, 1, 1))
                             mask_pixel_values = torch.tile(mask_pixel_values, (2, 1, 1, 1, 1))
                             mask = torch.tile(mask, (2, 1, 1, 1, 1))
+                            
+                if args.use_arcface:
+                    face_image_values = batch["face_image_values"].to(weight_dtype)
+                    # Increase the batch size when the length of the latent sequence of the current sample is small
+                    if args.training_with_video_token_length and not zero_stage == 3:
+                        if args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 16 >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]:
+                            face_image_values = torch.tile(face_image_values, (4, 1, 1, 1))
+                        elif args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 4 >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]:
+                            face_image_values = torch.tile(face_image_values, (2, 1, 1, 1))
 
                 if args.random_frame_crop:
                     def _create_special_list(length):
@@ -1520,7 +1535,7 @@ def main():
 
                     pixel_values = pixel_values[:, :temp_n_frames, :, :]
 
-                    if args.train_mode != "normal":
+                    if args.train_mode == "i2v":
                         mask_pixel_values = mask_pixel_values[:, :temp_n_frames, :, :]
                         mask = mask[:, :temp_n_frames, :, :]
                     
@@ -1545,12 +1560,12 @@ def main():
                     actual_video_length = (actual_video_length - 1) // sample_n_frames_bucket_interval + 1
 
                     pixel_values = pixel_values[:, :actual_video_length, :, :]
-                    if args.train_mode != "normal":
+                    if args.train_mode == "i2v":
                         mask_pixel_values = mask_pixel_values[:, :actual_video_length, :, :]
                         mask = mask[:, :actual_video_length, :, :]
 
                 # Make the inpaint latents to be zeros.
-                if args.train_mode != "normal":
+                if args.train_mode == "i2v":
                     t2v_flag = [(_mask == 1).all() for _mask in mask]
                     new_t2v_flag = []
                     for _mask in t2v_flag:
@@ -1563,7 +1578,7 @@ def main():
                 if args.low_vram:
                     torch.cuda.empty_cache()
                     vae.to(accelerator.device)
-                    if args.train_mode != "normal":
+                    if args.train_mode == "i2v":
                         clip_image_encoder.to(accelerator.device)
                     if not args.enable_text_encoder_in_dataloader:
                         text_encoder.to("cpu")
@@ -1587,7 +1602,7 @@ def main():
                     else:
                         latents = _batch_encode_vae(pixel_values)
 
-                    if args.train_mode != "normal":
+                    if args.train_mode == "i2v":
                         mask = rearrange(mask, "b f c h w -> b c f h w")
                         mask = torch.concat(
                             [
@@ -1614,14 +1629,30 @@ def main():
                             _clip_context = clip_image_encoder([clip_image[:, None, :, :]])
                             clip_context.append(_clip_context)
                         clip_context = torch.cat(clip_context)
-                                                
+                                  
+                if args.use_arcface:
+                    arcface_embeddings = []
+                    for face_img in batch["face_image_values"]:
+                        face_np = face_img.permute(1, 2, 0).cpu().numpy()  # [H, W, C], float32
+                        embedding, _ = process_face_embeddings(
+                            face_helper_1, face_helper_2, face_main_model,
+                            device=latents.device,
+                            weight_dtype=weight_dtype,
+                            image=face_np,
+                            is_align_face=True,
+                        )
+                        arcface_embeddings.append(embedding)
+
+                    arcface_embeddings = torch.cat(arcface_embeddings, dim=0)  # [B, 512]
+                    arcface_context = arcface_embeddings.unsqueeze(1)          # [B, 1, 512]
+                            
                 # wait for latents = vae.encode(pixel_values) to complete
                 if vae_stream_1 is not None:
                     torch.cuda.current_stream().wait_stream(vae_stream_1)
 
                 if args.low_vram:
                     vae.to('cpu')
-                    if args.train_mode != "normal":
+                    if args.train_mode == "i2v":
                         clip_image_encoder.to('cpu')
                     torch.cuda.empty_cache()
                     if not args.enable_text_encoder_in_dataloader:
@@ -1705,6 +1736,7 @@ def main():
                         seq_len=seq_len,
                         y=inpaint_latents if args.train_mode != "normal" else None,
                         clip_fea=clip_context if args.train_mode != "normal" else None,
+                        arc_fea= arcface_context if args.use_arcface else None,
                     )
                 
                 def custom_mse_loss(noise_pred, target, weighting=None, threshold=50):

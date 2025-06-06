@@ -401,8 +401,6 @@ class ImageVideoDataset(Dataset):
 
         self.larger_side_of_image_and_video = max(min(self.image_sample_size), min(self.video_sample_size))
 
-        self.use_face_image = use_face_image
-
     def get_batch(self, idx):
         data_info = self.dataset[idx % len(self.dataset)]
         
@@ -511,11 +509,9 @@ class ImageVideoDataset(Dataset):
                 ref_pixel_values = torch.ones_like(ref_pixel_values) * -1
             sample["ref_pixel_values"] = ref_pixel_values
 
-        # face image data
-        if self.use_face_image and "face_image_path" in data_info:
-            sample["face_image_path"] = os.path.join(self.data_root, data_info["id_image_path"])
-
-
+        # 이미지 가져와서 얼굴 좌표 크롭
+        sample['face_image'] = None
+        
         return sample
 
 class ImageVideoControlDataset(Dataset):
