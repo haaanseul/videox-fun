@@ -675,7 +675,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
 
-        print(in_dim +":::"+ dim +":::"+ patch_size +":::"+ patch_size)
+        #print(in_dim +":::"+ dim +":::"+ patch_size +":::"+ patch_size)
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
@@ -719,7 +719,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         if model_type == 'i2v':
             self.img_emb = MLPProj(1280, dim)
         if model_type == 'custom':
-            self.arc_emb = MLPProj(512, dim) # 512 -> dim으로
+            self.arc_emb = MLPProj(512, dim) #  arcface가 512
 
         self.teacache = None
         self.gradient_checkpointing = False

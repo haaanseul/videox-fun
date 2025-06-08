@@ -1108,7 +1108,7 @@ def main():
         video_sample_size=args.video_sample_size, video_sample_stride=args.video_sample_stride, video_sample_n_frames=args.video_sample_n_frames, 
         video_repeat=args.video_repeat, 
         image_sample_size=args.image_sample_size,
-        enable_bucket=args.enable_bucket, enable_inpaint=True if args.train_mode != "normal" else False,
+        enable_bucket=args.enable_bucket, enable_inpaint=True if args.train_mode != "i2v" else False,
         use_face_image=args.use_arcface # use face image
     )
     
@@ -1424,7 +1424,7 @@ def main():
         disable=not accelerator.is_local_main_process,
     )
 
-    if args.multi_stream and args.train_mode != "normal":
+    if args.multi_stream and args.train_mode != "i2v":
         # create extra cuda streams to speedup inpaint vae computation
         vae_stream_1 = torch.cuda.Stream()
         vae_stream_2 = torch.cuda.Stream()
@@ -1500,15 +1500,6 @@ def main():
                             mask_pixel_values = torch.tile(mask_pixel_values, (2, 1, 1, 1, 1))
                             mask = torch.tile(mask, (2, 1, 1, 1, 1))
                             
-                if args.use_arcface:
-                    face_image_values = batch["face_image_values"].to(weight_dtype)
-                    # Increase the batch size when the length of the latent sequence of the current sample is small
-                    if args.training_with_video_token_length and not zero_stage == 3:
-                        if args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 16 >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]:
-                            face_image_values = torch.tile(face_image_values, (4, 1, 1, 1))
-                        elif args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 4 >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]:
-                            face_image_values = torch.tile(face_image_values, (2, 1, 1, 1))
-
                 if args.random_frame_crop:
                     def _create_special_list(length):
                         if length == 1:
@@ -1630,22 +1621,22 @@ def main():
                             clip_context.append(_clip_context)
                         clip_context = torch.cat(clip_context)
                                   
-                if args.use_arcface:
-                    arcface_embeddings = []
-                    for face_img in batch["face_image_values"]:
-                        face_np = face_img.permute(1, 2, 0).cpu().numpy()  # [H, W, C], float32
-                        embedding, _ = process_face_embeddings(
-                            face_helper_1, face_helper_2, face_main_model,
-                            device=latents.device,
-                            weight_dtype=weight_dtype,
-                            image=face_np,
-                            is_align_face=True,
-                        )
-                        arcface_embeddings.append(embedding)
+                    if args.use_arcface:
+                        arcface_embeddings = []
+                        for face_img in batch["face_image_values"]:
+                            face_np = face_img.permute(1, 2, 0).cpu().numpy()  # [H, W, C], float32
+                            embedding, _ = process_face_embeddings(
+                                face_helper_1, face_helper_2, face_main_model,
+                                device=latents.device,
+                                weight_dtype=weight_dtype,
+                                image=face_np,
+                                is_align_face=True,
+                            )
+                            arcface_embeddings.append(embedding)
 
-                    arcface_embeddings = torch.cat(arcface_embeddings, dim=0)  # [B, 512]
-                    arcface_context = arcface_embeddings.unsqueeze(1)          # [B, 1, 512]
-                            
+                        arcface_embeddings = torch.cat(arcface_embeddings, dim=0)  # [B, 512]
+                        arcface_context = arcface_embeddings.unsqueeze(1)          # [B, 1, 512]
+                    
                 # wait for latents = vae.encode(pixel_values) to complete
                 if vae_stream_1 is not None:
                     torch.cuda.current_stream().wait_stream(vae_stream_1)
@@ -1734,8 +1725,8 @@ def main():
                         context=prompt_embeds,
                         t=timesteps,
                         seq_len=seq_len,
-                        y=inpaint_latents if args.train_mode != "normal" else None,
-                        clip_fea=clip_context if args.train_mode != "normal" else None,
+                        y=inpaint_latents if args.train_mode != "i2v" else None,
+                        clip_fea=clip_context if args.train_mode != "i2v" else None,
                         arc_fea= arcface_context if args.use_arcface else None,
                     )
                 

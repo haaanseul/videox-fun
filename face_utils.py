@@ -10,40 +10,6 @@ from insightface.app import FaceAnalysis
 from diffusers.utils import load_image
 from torchvision.transforms.functional import normalize
 
-
-# Similar to diffusers.pipelines.hunyuandit.pipeline_hunyuandit.get_resize_crop_region_for_grid
-def get_resize_crop_region_for_grid(src: tuple, tgt_width: int, tgt_height: int) -> tuple:
-    """
-    Calculate the resize and crop region for an image to fit into a target width and height while maintaining aspect ratio.
-
-    Args:
-        src (tuple): A tuple containing the original height and width of the source image (h, w).
-        tgt_width (int): The target width for the resized image.
-        tgt_height (int): The target height for the resized image.
-
-    Returns:
-        tuple: A tuple containing two tuples:
-            - The first tuple represents the top-left corner of the crop region (crop_top, crop_left).
-            - The second tuple represents the bottom-right corner of the crop region (crop_bottom, crop_right).
-    """
-    h, w = src
-    r = h / w  # Aspect ratio of the source image
-
-    # Determine the new size while maintaining aspect ratio
-    if r > (tgt_height / tgt_width):
-        resize_height = tgt_height
-        resize_width = int(round(tgt_height / h * w))
-    else:
-        resize_width = tgt_width
-        resize_height = int(round(tgt_width / w * h))
-
-    # Calculate the crop region
-    crop_top = int(round((tgt_height - resize_height) / 2.0))
-    crop_left = int(round((tgt_width - resize_width) / 2.0))
-
-    return (crop_top, crop_left), (crop_top + resize_height, crop_left + resize_width)
-
-
 def resize_numpy_image_long(image: np.ndarray, resize_long_edge: int = 768):
     """
     Resize the input image to a specified long edge while maintaining aspect ratio.
@@ -63,7 +29,6 @@ def resize_numpy_image_long(image: np.ndarray, resize_long_edge: int = 768):
     w = int(w * k)
     image = cv2.resize(image, (w, h), interpolation=cv2.INTER_LANCZOS4)
     return image
-
 
 def img2tensor(imgs, bgr2rgb: bool = True, float32: bool = True):
     """Convert Numpy array to tensor.
@@ -280,30 +245,6 @@ def prepare_face_models(model_path: str, device: str, dtype: torch.dtype):
     return face_helper_1, face_helper_2, face_main_model
 
 
-def resize_image_with_padding(img: Image.Image, target_size=(256, 256)):
-    """
-    Resize the image while maintaining aspect ratio and add padding.
-
-    Args:
-        img (Image.Image): The input image to resize.
-        target_size (tuple): The target size for the output image (width, height).
-
-    Returns:
-        Image.Image: The resized and padded image.
-    """
-    # Calculate new size while maintaining aspect ratio
-    ratio = min(target_size[0] / img.size[0], target_size[1] / img.size[1])
-    new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
-    img = img.resize(new_size, Image.LANCZOS)
-
-    # Create a new image for output, filled with black
-    new_img = Image.new("RGB", target_size, (0, 0, 0))
-    # Paste the resized image in the center
-    new_img.paste(img, ((target_size[0] - new_size[0]) // 2, (target_size[1] - new_size[1]) // 2))
-    
-    return new_img
-
-
 def align_face_kps(image_np: np.ndarray, landmarks: np.ndarray, face_size: int = 512):
     """
     Align the face based on landmarks.
@@ -336,60 +277,6 @@ def align_face_kps(image_np: np.ndarray, landmarks: np.ndarray, face_size: int =
     aligned_image = cv2.warpAffine(image_np, matrix, (face_size, face_size), flags=cv2.INTER_LINEAR)
     
     return aligned_image
-
-
-def pad_image_to_aspect_ratio(image: np.ndarray, ratio: float):
-    """
-    Pad the image to maintain the specified aspect ratio.
-
-    Args:
-        image (np.ndarray): The input image as a NumPy array.
-        ratio (float): The target aspect ratio (width / height).
-
-    Returns:
-        Image.Image: The padded image as a PIL Image.
-    """
-    # Get current image dimensions
-    current_height, current_width = image.shape[:2]
-
-    # Calculate the shortest side of the current image
-    min_side = min(current_height, current_width)
-
-    # Calculate new dimensions based on target aspect ratio
-    if ratio > 1.0:
-        new_height = min_side
-        new_width = int(new_height * ratio)
-    else:
-        new_width = min_side
-        new_height = int(new_width / ratio)
-
-    # Ensure new dimensions are greater than current dimensions
-    new_height = max(new_height, current_height)
-    new_width = max(new_width, current_width)
-
-    # Calculate padding amounts
-    pad_height = new_height - current_height
-    pad_width = new_width - current_width
-
-    # Calculate top, bottom, left, and right padding
-    top = pad_height // 2
-    bottom = pad_height - top
-    left = pad_width // 2
-    right = pad_width - left
-
-    # Use cv2.copyMakeBorder for padding
-    padded_image = cv2.copyMakeBorder(
-        image,
-        top,
-        bottom,
-        left,
-        right,
-        cv2.BORDER_CONSTANT,  # Padding type
-        value=[0, 0, 0]  # Padding color (black)
-    )
-    
-    return Image.fromarray(padded_image)
-
 
 def extract_face(img_file_path: str, model_path: str, device: str = "cuda", dtype: torch.dtype = torch.bfloat16, aligned_face: bool = False):
     """
